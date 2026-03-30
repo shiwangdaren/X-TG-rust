@@ -1,0 +1,19 @@
+[package]
+name = "xtg-service"
+version = "0.1.0"
+edition.workspace = true
+
+[dependencies]
+xtg-core = { path = "../core" }
+xtg-tg-bridge = { path = "../tg-bridge" }
+xtg-media = { path = "../media" }
+xtg-x-session = { path = "../x-session" }
+tokio.workspace = true
+tracing.workspace = true
+serde.workspace = true
+toml.workspace = true
+serde_json.workspace = true
+anyhow.workspace = true
+reqwest = { workspace = true, features = ["json"] }
+directories = "5"
+grammers-client.workspace = true

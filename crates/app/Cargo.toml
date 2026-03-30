@@ -1,0 +1,21 @@
+[package]
+name = "xtg-app"
+version = "0.1.0"
+edition.workspace = true
+
+[[bin]]
+name = "xtg-app"
+path = "src/main.rs"
+
+[dependencies]
+xtg-service = { path = "../xtg-service" }
+xtg-core = { path = "../core" }
+eframe.workspace = true
+egui.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+serde.workspace = true
+directories = "5"
+ab_glyph = "0.2"
+msgbox = "0.7"

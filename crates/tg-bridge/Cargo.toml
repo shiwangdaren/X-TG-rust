@@ -1,0 +1,16 @@
+[package]
+name = "xtg-tg-bridge"
+version = "0.1.0"
+edition.workspace = true
+
+[dependencies]
+xtg-core = { path = "../core" }
+grammers-client.workspace = true
+grammers-session.workspace = true
+grammers-mtsender.workspace = true
+grammers-tl-types.workspace = true
+tokio.workspace = true
+async-trait.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+chrono.workspace = true
