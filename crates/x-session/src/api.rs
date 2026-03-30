@@ -107,9 +107,10 @@ impl TwitterApiV2Source {
         let url = format!("{}/2/users/{}/tweets", self.api_base, user_id);
         let mut req = self.auth(self.http.get(&url)).query(&[
             ("max_results", "5"),
+            // `note_tweet`：长帖（>280 字等）的完整正文；仅 `text` 时常为截断预览。
             (
                 "tweet.fields",
-                "created_at,attachments,referenced_tweets",
+                "created_at,attachments,referenced_tweets,note_tweet",
             ),
             ("expansions", "attachments.media_keys"),
             (
@@ -154,10 +155,11 @@ impl TwitterApiV2Source {
             let reply_to_url = tw.reply_to_id().map(|id| {
                 format!("https://x.com/i/status/{}", id)
             });
+            let body_text = tw.full_text();
             posts.push(Post {
                 id: tw.id,
                 author_handle: handle.to_string(),
-                text: tw.text,
+                text: body_text,
                 media,
                 url,
                 posted_at_ms: tw
@@ -305,9 +307,28 @@ struct Tweet {
     attachments: Option<Attachments>,
     #[serde(default)]
     referenced_tweets: Option<Vec<ReferencedTweet>>,
+    /// 长帖完整正文（X API v2）；缺省时用 `text`（可能为截断预览）。
+    #[serde(default)]
+    note_tweet: Option<NoteTweetPayload>,
+}
+
+/// <https://developer.x.com/en/docs/twitter-api/data-dictionary/object-model/note-tweet>
+#[derive(Deserialize)]
+struct NoteTweetPayload {
+    #[serde(default)]
+    text: String,
 }
 
 impl Tweet {
+    fn full_text(&self) -> String {
+        self.note_tweet
+            .as_ref()
+            .map(|n| n.text.trim())
+            .filter(|s| !s.is_empty())
+            .map(String::from)
+            .unwrap_or_else(|| self.text.clone())
+    }
+
     /// 回复链中的直接父帖 id（`referenced_tweets` 中 `type=replied_to`）。
     fn reply_to_id(&self) -> Option<&str> {
         let refs = self.referenced_tweets.as_ref()?;
