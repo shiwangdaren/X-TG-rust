@@ -78,7 +78,7 @@ pub async fn run_update_listener(
                 &st.x_bearer_token,
                 &st.x_api_base,
             );
-            let posts = match x.fetch_latest(h).await {
+            let posts = match x.fetch_latest(h, None).await {
                 Ok(p) => p,
                 Err(e) => {
                     let _ = log.send(format!("「最新」抓取 @{h} 失败: {e}"));

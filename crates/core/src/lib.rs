@@ -60,7 +60,8 @@ pub type Result<T> = std::result::Result<T, CoreError>;
 /// 从 X 侧拉取某 handle 的最新帖子（实现可为浏览器会话或假数据）。
 #[async_trait]
 pub trait XSource: Send + Sync {
-    async fn fetch_latest(&self, handle: &str) -> Result<Vec<Post>>;
+    /// `since_id` 为上次已处理的最大推文 id 时，X API v2 可传 `since_id`，只返回更晚的推文，减少流量。
+    async fn fetch_latest(&self, handle: &str, since_id: Option<&str>) -> Result<Vec<Post>>;
 }
 
 /// 以 Telegram 用户身份投递帖子（媒体已由上层下载到本地路径）。

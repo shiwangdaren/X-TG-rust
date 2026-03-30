@@ -2,6 +2,9 @@
 
 use async_trait::async_trait;
 use serde::Deserialize;
+use std::collections::HashMap;
+use std::sync::Mutex;
+use tokio::sync::Semaphore;
 use tracing::warn;
 use xtg_core::{CoreError, MediaItem, MediaKind, Post, Result, XSource};
 
@@ -18,6 +21,9 @@ pub struct TwitterApiV2Source {
     http: reqwest::Client,
     bearer_token: String,
     api_base: String,
+    /// 全进程仅 1 个并发 X HTTP 请求（与错开轮询配合，避免突发限流）。
+    fetch_semaphore: std::sync::Arc<Semaphore>,
+    user_id_cache: Mutex<HashMap<String, String>>,
 }
 
 impl TwitterApiV2Source {
@@ -30,6 +36,8 @@ impl TwitterApiV2Source {
             http: reqwest::Client::new(),
             bearer_token,
             api_base,
+            fetch_semaphore: std::sync::Arc::new(Semaphore::new(1)),
+            user_id_cache: Mutex::new(HashMap::new()),
         }
     }
 
@@ -41,6 +49,15 @@ impl TwitterApiV2Source {
     }
 
     async fn user_id_by_username(&self, username: &str) -> Result<String> {
+        {
+            let cache = self.user_id_cache.lock().map_err(|e| {
+                CoreError::Fetch(format!("user_id cache lock: {e}"))
+            })?;
+            if let Some(id) = cache.get(username) {
+                return Ok(id.clone());
+            }
+        }
+
         let url = format!(
             "{}/2/users/by/username/{}",
             self.api_base,
@@ -70,15 +87,26 @@ impl TwitterApiV2Source {
             CoreError::Fetch(format!("解析用户 JSON: {e}; body={}", body.chars().take(200).collect::<String>()))
         })?;
 
-        v.data
+        let id = v
+            .data
             .map(|d| d.id)
-            .ok_or_else(|| CoreError::Fetch("X API：未找到该用户名或无权访问".into()))
+            .ok_or_else(|| CoreError::Fetch("X API：未找到该用户名或无权访问".into()))?;
+
+        if let Ok(mut cache) = self.user_id_cache.lock() {
+            cache.insert(username.to_string(), id.clone());
+        }
+        Ok(id)
     }
 
-    async fn user_tweets(&self, user_id: &str, handle: &str) -> Result<Vec<Post>> {
+    async fn user_tweets(
+        &self,
+        user_id: &str,
+        handle: &str,
+        since_id: Option<&str>,
+    ) -> Result<Vec<Post>> {
         let url = format!("{}/2/users/{}/tweets", self.api_base, user_id);
-        let query = [
-            ("max_results", "15"),
+        let mut req = self.auth(self.http.get(&url)).query(&[
+            ("max_results", "5"),
             (
                 "tweet.fields",
                 "created_at,attachments,referenced_tweets",
@@ -88,10 +116,12 @@ impl TwitterApiV2Source {
                 "media.fields",
                 "type,url,preview_image_url,variants",
             ),
-        ];
+        ]);
+        if let Some(sid) = since_id.filter(|s| !s.is_empty()) {
+            req = req.query(&[("since_id", sid)]);
+        }
 
-        let resp = self
-            .auth(self.http.get(&url).query(&query))
+        let resp = req
             .send()
             .await
             .map_err(|e| CoreError::Fetch(e.to_string()))?;
@@ -144,7 +174,7 @@ impl TwitterApiV2Source {
 
 #[async_trait]
 impl XSource for TwitterApiV2Source {
-    async fn fetch_latest(&self, handle: &str) -> Result<Vec<Post>> {
+    async fn fetch_latest(&self, handle: &str, since_id: Option<&str>) -> Result<Vec<Post>> {
         let handle = handle.trim().trim_start_matches('@');
         if handle.is_empty() {
             return Err(CoreError::Fetch("empty handle".into()));
@@ -153,8 +183,14 @@ impl XSource for TwitterApiV2Source {
             return Err(CoreError::Fetch("未配置 X API Bearer Token".into()));
         }
 
+        let _permit = self
+            .fetch_semaphore
+            .acquire()
+            .await
+            .map_err(|e| CoreError::Fetch(format!("semaphore: {e}")))?;
+
         let uid = self.user_id_by_username(handle).await?;
-        let mut posts = self.user_tweets(&uid, handle).await?;
+        let mut posts = self.user_tweets(&uid, handle, since_id).await?;
 
         posts.sort_by(|a, b| {
             let na: u128 = a.id.parse().unwrap_or(0);

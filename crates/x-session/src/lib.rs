@@ -15,7 +15,7 @@ pub struct FakeXSource {
 
 #[async_trait]
 impl XSource for FakeXSource {
-    async fn fetch_latest(&self, _handle: &str) -> Result<Vec<Post>> {
+    async fn fetch_latest(&self, _handle: &str, _since_id: Option<&str>) -> Result<Vec<Post>> {
         Ok(self.posts.clone())
     }
 }

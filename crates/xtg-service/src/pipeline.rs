@@ -1,7 +1,8 @@
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 use tokio::sync::broadcast;
 use tracing::{error, info};
-use xtg_core::{tweet_id_to_unix_ms, JobConfig, Post, TgSink};
+use xtg_core::{tweet_id_to_unix_ms, JobConfig, Post, Result as CoreResult, TgSink};
 use xtg_media::{download_post_media, temp_dir_for_post};
 use xtg_tg_bridge::GrammersSink;
 
@@ -18,7 +19,48 @@ fn log_line(tx: &broadcast::Sender<String>, line: String) {
     let _ = tx.send(line);
 }
 
-/// 单次轮询：对每个 handle 拉取、过滤新帖、下载媒体、发送。
+/// 多账号时，相邻 handle 之间错开间隔（秒），避免同一轮内同时打 X API。
+fn stagger_between_handles(interval_secs: f64, n_handles: usize) -> Duration {
+    if n_handles <= 1 {
+        return Duration::ZERO;
+    }
+    let base = (interval_secs / n_handles as f64).clamp(0.5, 5.0);
+    Duration::from_secs_f64(base)
+}
+
+const FETCH_RETRY_MAX: u32 = 5;
+const BACKOFF_INITIAL_MS: u64 = 1000;
+const BACKOFF_MAX_MS: u64 = 60_000;
+
+async fn fetch_latest_with_backoff(
+    x: &dyn xtg_core::XSource,
+    handle: &str,
+    since_id: Option<&str>,
+    log: &broadcast::Sender<String>,
+) -> CoreResult<Vec<Post>> {
+    let mut delay_ms = BACKOFF_INITIAL_MS;
+    let mut attempt = 0u32;
+    loop {
+        attempt += 1;
+        match x.fetch_latest(handle, since_id).await {
+            Ok(p) => return Ok(p),
+            Err(e) if attempt < FETCH_RETRY_MAX => {
+                log_line(
+                    log,
+                    format!(
+                        "@{handle} 抓取失败 ({}/{}): {e}，{}ms 后重试",
+                        attempt, FETCH_RETRY_MAX, delay_ms
+                    ),
+                );
+                tokio::time::sleep(Duration::from_millis(delay_ms)).await;
+                delay_ms = (delay_ms.saturating_mul(2)).min(BACKOFF_MAX_MS);
+            }
+            Err(e) => return Err(e),
+        }
+    }
+}
+
+/// 单次轮询：对每个 handle 错开拉取、指数退避重试、过滤新帖、下载媒体、发送。
 pub async fn run_poll_round(
     x: &dyn xtg_core::XSource,
     client: &grammers_client::Client,
@@ -40,7 +82,13 @@ pub async fn run_poll_round(
 
     let tg = GrammersSink::new(client.clone());
 
-    for h in handles {
+    let n = handles.len();
+    let stagger = stagger_between_handles(job.poll_interval_secs, n);
+    for (idx, h) in handles.into_iter().enumerate() {
+        if idx > 0 && stagger > Duration::ZERO {
+            tokio::time::sleep(stagger).await;
+        }
+
         let last = match TweetStore::open(store_path) {
             Ok(s) => match s.last_id(&h) {
                 Ok(v) => v,
@@ -55,10 +103,11 @@ pub async fn run_poll_round(
             }
         };
 
-        let posts = match x.fetch_latest(&h).await {
+        let since = last.as_deref();
+        let posts = match fetch_latest_with_backoff(x, &h, since, log).await {
             Ok(p) => p,
             Err(e) => {
-                log_line(log, format!("抓取 @{h} 失败: {e}"));
+                log_line(log, format!("抓取 @{h} 最终失败: {e}"));
                 error!("fetch {h}: {e}");
                 continue;
             }
